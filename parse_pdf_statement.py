@@ -1,13 +1,13 @@
-
 from __future__ import annotations
 
 import os
 import re
 from datetime import datetime
-from typing import List, Optional, Dict
+from pathlib import Path
+from typing import Dict, List, Optional
 
-import pdfplumber
 import pandas as pd
+import pdfplumber
 
 
 # -----------------------------
@@ -15,7 +15,9 @@ import pandas as pd
 # -----------------------------
 def extract_statement_id(pdf_path: str) -> Optional[str]:
     """
-    Extracts trailing numeric ID from filenames like:
+    Извлекает числовой идентификатор из конца имени PDF-файла.
+
+    Пример:
     Донских_А_А_о_движении_денежных_средств_ozonbank_document_22873047.pdf
     -> 22873047
     """
@@ -25,6 +27,7 @@ def extract_statement_id(pdf_path: str) -> Optional[str]:
 
 
 def norm_spaces(s: str) -> str:
+    """Нормализует пробелы и убирает типичные текстовые артефакты PDF."""
     # Also normalize common PDF artifacts
     return re.sub(r"\s+", " ", (s or "").replace("\u00a0", " ").strip())
 
@@ -33,10 +36,11 @@ AMOUNT_CLEAN_RE = re.compile(r"[^0-9,\.\- ]")
 
 
 def parse_rub_amount(x: str) -> Optional[float]:
+    """Преобразует строку с суммой в рублях в число `float`."""
     if not x:
         return None
     t = norm_spaces(x)
-    t = t.replace("₽", "").replace("RUB", "").replace("руб.", "").strip()
+    t = t.replace("в‚Ѕ", "").replace("RUB", "").replace("СЂСѓР±.", "").strip()
     t = t.replace("- ", "-")  # "- 1 000,00" -> "-1000,00"
     t = AMOUNT_CLEAN_RE.sub("", t).replace(" ", "")
 
@@ -68,9 +72,11 @@ DATE_RE = re.compile(r"(\d{2}\.\d{2}\.\d{4})(?:\s+(\d{2}:\d{2})(?::(\d{2}))?)?")
 
 def parse_ru_dt_from_first_cell(cell: str) -> Optional[datetime]:
     """
-    Robust extraction from the first column:
-    - Works even if the PDF cell has line breaks or extra text.
-    - Supports seconds (HH:MM:SS).
+    Надежно извлекает дату и время из первой ячейки строки.
+
+    Особенности:
+    - работает, даже если в ячейке есть переносы строк или лишний текст;
+    - поддерживает время с секундами в формате `HH:MM:SS`.
     """
     s = norm_spaces(cell)
     m = DATE_RE.search(s)
@@ -95,20 +101,26 @@ def parse_ru_dt_from_first_cell(cell: str) -> Optional[datetime]:
 # Table post-processing
 # -----------------------------
 
+
 def is_probably_header_row(row: List[Optional[str]]) -> bool:
+    """Определяет, похожа ли строка на заголовок таблицы выписки."""
     joined = " ".join([norm_spaces(x or "") for x in row]).lower()
-    markers = ["дата", "время", "документ", "назнач", "сумм", "операц"]
+    markers = ["РґР°С‚Р°", "РІСЂРµРјСЏ", "РґРѕРєСѓРјРµРЅС‚", "РЅР°Р·РЅР°С‡", "СЃСѓРјРј", "РѕРїРµСЂР°С†"]
     return sum(m in joined for m in markers) >= 2
 
 
 def clean_row(row: List[Optional[str]]) -> List[str]:
+    """Очищает все ячейки строки и нормализует в них пробелы."""
     return [norm_spaces(x or "") for x in row]
 
 
 def merge_multiline_rows(rows: List[List[str]]) -> List[List[str]]:
     """
-    If 1st column (date) is empty -> continuation of previous row.
-    (Purpose often wraps into the next physical line.)
+    Склеивает физически разорванные строки таблицы в одну логическую запись.
+
+    Если первая колонка с датой пустая, строка считается продолжением
+    предыдущей записи. Это полезно, когда назначение платежа переносится
+    на следующую строку в PDF.
     """
     merged: List[List[str]] = []
     for r in rows:
@@ -139,7 +151,9 @@ def merge_multiline_rows(rows: List[List[str]]) -> List[List[str]]:
 # Extraction
 # -----------------------------
 
+
 def extract_transactions(pdf_path: str) -> pd.DataFrame:
+    """Извлекает операции из PDF-выписки и возвращает их в виде DataFrame."""
     all_rows: List[List[str]] = []
 
     with pdfplumber.open(pdf_path) as pdf:
@@ -190,7 +204,9 @@ def extract_transactions(pdf_path: str) -> pd.DataFrame:
         purpose = r[2] if max_cols > 2 else ""
 
         # Amount: try last column first; if empty, also try second-last (some layouts)
-        amount = parse_rub_amount(r[-1]) or (parse_rub_amount(r[-2]) if max_cols >= 2 else None)
+        amount = parse_rub_amount(r[-1]) or (
+            parse_rub_amount(r[-2]) if max_cols >= 2 else None
+        )
 
         # Skip noise lines
         if dt is None and amount is None:
@@ -213,7 +229,10 @@ def extract_transactions(pdf_path: str) -> pd.DataFrame:
     return df
 
 
-def pdf_to_excel_transactions_only(pdf_path: str, out_xlsx: str, sheet_name: str = "Transactions") -> pd.DataFrame:
+def pdf_to_excel_transactions_only(
+    pdf_path: str, out_xlsx: str, sheet_name: str = "Transactions"
+) -> pd.DataFrame:
+    """Извлекает операции из PDF и сохраняет их в Excel-файл."""
     df = extract_transactions(pdf_path)
 
     with pd.ExcelWriter(out_xlsx, engine="openpyxl") as writer:
@@ -235,7 +254,11 @@ def pdf_to_excel_transactions_only(pdf_path: str, out_xlsx: str, sheet_name: str
 
 
 if __name__ == "__main__":
-    pdf_path = "26450959.pdf"
+    pdf_files = list(Path(".").glob("*.pdf"))
+    if not pdf_files:
+        raise FileNotFoundError("No PDF files found in the project root.")
+
+    pdf_path = str(max(pdf_files, key=lambda path: path.stat().st_ctime))
 
     statement_id = extract_statement_id(pdf_path)
 
